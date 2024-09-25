@@ -1,6 +1,8 @@
 import os
 from functools import lru_cache
+from typing import Callable, Any, Optional
 
+from pydantic import ImportString
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -37,6 +39,9 @@ class Settings(BaseSettings):
     max_jobs: int = 50000
     request_semaphore_jobs: int = 5
     queue_name: str = "arq:queue"
+
+    job_serializer: Optional[ImportString[Callable[[Any], Any]]] = None
+    job_deserializer: Optional[ImportString[Callable[[Any], Any]]] = None
 
     model_config = SettingsConfigDict(env_file=os.getenv("ENV_FILE", ".env"))
 

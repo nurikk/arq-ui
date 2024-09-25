@@ -1,6 +1,7 @@
 import asyncio
 import logging
 from datetime import UTC, datetime, timedelta
+from typing import Annotated
 from zoneinfo import ZoneInfo
 
 import arq
@@ -10,6 +11,7 @@ from arq import create_pool
 from arq.connections import RedisSettings
 from arq.jobs import DeserializationError
 from arq.jobs import Job as ArqJob
+from fastapi import Depends
 from core.cache import LRUCache
 from core.config import Settings, get_app_settings
 from schemas.job import ColorStatistics, Job, JobCreate, JobStatus, JobsTimeStatistics
@@ -26,16 +28,22 @@ class JobService:
         cache: LRUCache,
         request_semaphore_jobs: int = 5,
     ) -> None:
+        self.redis = None
         self.redis_settings = redis_settings
         self.cache = cache
         self.request_semaphore_jobs = request_semaphore_jobs
         self.logger = logging.getLogger(__name__)
 
+    async def init_pool(self):
+        if self.redis is None:
+            self.redis = await create_pool(self.redis_settings,
+                                           job_serializer=settings.job_serializer,
+                                           job_deserializer=settings.job_deserializer)
+
     async def get_status(self) -> dict[str, str]:
         """Get status redis."""
-        redis = await create_pool(self.redis_settings)
-        keys_queued = await redis.keys(arq.constants.job_key_prefix + "*")
-        keys_results = await redis.keys(arq.constants.result_key_prefix + "*")
+        keys_queued = await self.redis.keys(arq.constants.job_key_prefix + "*")
+        keys_results = await self.redis.keys(arq.constants.result_key_prefix + "*")
 
         processed_keys = keys_queued + keys_results
         return {"jobs_len": str(len(processed_keys))}
@@ -43,7 +51,6 @@ class JobService:
     async def fetch_job_info(
         self,
         semaphore: asyncio.Semaphore,
-        redis: arq.ArqRedis,
         key_id: str,
     ) -> Job | None:
         """Fetch job information."""
@@ -57,12 +64,12 @@ class JobService:
                 "",
             )
 
-            arq_job = ArqJob(key_id_without_prefix, redis, _queue_name=settings.queue_name)
+            arq_job = ArqJob(key_id_without_prefix, self.redis, _queue_name=settings.queue_name)
             status = await arq_job.status()
 
             if status == arq.jobs.JobStatus.complete:
                 complete_key: str = arq.constants.result_key_prefix + key_id_without_prefix
-                redis_raw = await redis.get(complete_key)
+                redis_raw = await self.redis.get(complete_key)
                 try:
                     job_result: arq.jobs.JobResult = arq.jobs.deserialize_result(redis_raw)
                 except DeserializationError:
@@ -91,7 +98,7 @@ class JobService:
 
             else:
                 keys_queued_job = arq.constants.job_key_prefix + key_id_without_prefix
-                redis_raw = await redis.get(keys_queued_job)
+                redis_raw = await self.redis.get(keys_queued_job)
                 job: arq.jobs.JobDef = arq.jobs.deserialize_job(redis_raw)
                 job_schema = Job(
                     id=key_id_without_prefix,
@@ -106,9 +113,8 @@ class JobService:
 
     async def get_all_jobs(self, max_jobs: int = 50000) -> list[Job]:
         """Get all jobs."""
-        redis = await create_pool(self.redis_settings)
-        keys_queued = await redis.keys(arq.constants.job_key_prefix + "*")
-        keys_results = await redis.keys(arq.constants.result_key_prefix + "*")
+        keys_queued = await self.redis.keys(arq.constants.job_key_prefix + "*")
+        keys_results = await self.redis.keys(arq.constants.result_key_prefix + "*")
 
         processed_keys = [key.decode() for key in keys_queued + keys_results]
 
@@ -117,7 +123,7 @@ class JobService:
 
         semaphore = asyncio.Semaphore(self.request_semaphore_jobs)
 
-        tasks = [self.fetch_job_info(semaphore, redis, key_id) for key_id in processed_keys]
+        tasks = [self.fetch_job_info(semaphore, key_id) for key_id in processed_keys]
         jobs_task = await asyncio.gather(*tasks)
         jobs: list[Job] = [job for job in jobs_task if job is not None]
 
@@ -131,18 +137,15 @@ class JobService:
 
     async def get_job_by_id(self, job_id: str) -> Job | None:
         """Get job by id."""
-        redis = await create_pool(self.redis_settings)
         key_id = arq.constants.job_key_prefix + job_id
         return await self.fetch_job_info(
             asyncio.Semaphore(self.request_semaphore_jobs),
-            redis,
             key_id,
         )
 
     async def abort_job(self, job_id: str) -> bool:
         """Abort job."""
-        redis = await create_pool(self.redis_settings)
-        job: ArqJob = ArqJob(job_id, redis, _queue_name=settings.queue_name)
+        job: ArqJob = ArqJob(job_id, self.redis, _queue_name=settings.queue_name)
         return await job.abort()
 
     def adjust_color_intensity(self, color_intensity: float) -> float:
@@ -215,8 +218,7 @@ class JobService:
 
     async def create_job(self, new_job: JobCreate) -> Job | None:
         """Create a new job."""
-        redis = await create_pool(self.redis_settings)
-        await redis.enqueue_job(
+        await self.redis.enqueue_job(
             new_job.function,
             *new_job.args,
             _job_id=new_job.job_id,
@@ -227,3 +229,11 @@ class JobService:
         )
 
         return None
+
+
+async def get_job_service() -> JobService:
+    service = JobService(redis_settings=settings.redis_settings, cache=LRUCache())
+    await service.init_pool()
+    return service
+
+JobServiceDep = Annotated[JobService, Depends(get_job_service)]

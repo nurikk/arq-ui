@@ -17,7 +17,7 @@ from schemas.job import (
 )
 from schemas.paged import Paged
 from schemas.problem import ProblemDetail
-from services.job_service import JobService
+from src.services.job_service import JobServiceDep
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/jobs", tags=["Jobs"])
@@ -38,6 +38,7 @@ settings: Settings = get_app_settings()
     },
 )
 async def get_all(
+    job_service: JobServiceDep,
     limit: int = Query(
         default=50,
         le=500,
@@ -76,13 +77,9 @@ async def get_all(
     finish_time: datetime | None = Query(  # noqa: B008
         None,
         description="Filter jobs by finish time.",
-    ),
+    )
 ) -> JobsInfo:
     """Get all jobs."""
-    job_service = JobService(
-        get_redis_settings(),
-        get_lru_cache(),
-    )
     # We retrieve all tasks because we cannot initially filter them directly in Redis.
     # Subsequently, we filter them at the application level.
     # This code is simple, so we don't separate it out.
@@ -140,7 +137,7 @@ async def get_all(
             reverse=True,
         )
 
-    paging_jobs = jobs[offset : offset + limit]
+    paging_jobs = jobs[offset: offset + limit]
 
     return JobsInfo(
         functions=functions,
@@ -169,12 +166,8 @@ async def get_all(
         500: {"description": "Internal server error.", "model": ProblemDetail},
     },
 )
-async def get_job_by_id(job_id: str) -> Job:
+async def get_job_by_id(job_id: str, job_service: JobServiceDep) -> Job:
     """Get job by id."""
-    job_service = JobService(
-        get_redis_settings(),
-        get_lru_cache(),
-    )
     job = await job_service.get_job_by_id(job_id)
     if not job:
         raise HTTPException(
@@ -196,12 +189,8 @@ async def get_job_by_id(job_id: str) -> Job:
         500: {"description": "Internal server error.", "model": ProblemDetail},
     },
 )
-async def abort_job(job_id: str) -> None:
+async def abort_job(job_id: str, job_service: JobServiceDep) -> None:
     """Abort job."""
-    job_service = JobService(
-        get_redis_settings(),
-        get_lru_cache(),
-    )
     result: bool = await job_service.abort_job(job_id)
     if not result:
         raise HTTPException(
@@ -223,12 +212,8 @@ async def abort_job(job_id: str) -> None:
         500: {"description": "Internal server error.", "model": ProblemDetail},
     },
 )
-async def get_hourly_statistics() -> list[JobsTimeStatistics]:
+async def get_hourly_statistics(job_service: JobServiceDep) -> list[JobsTimeStatistics]:
     """Get hourly statistics."""
-    job_service = JobService(
-        get_redis_settings(),
-        get_lru_cache(),
-    )
     jobs = await job_service.get_all_jobs(settings.max_jobs)
 
     return job_service.generate_statistics(jobs)
