@@ -17,7 +17,7 @@ from schemas.job import (
 )
 from schemas.paged import Paged
 from schemas.problem import ProblemDetail
-from src.services.job_service import JobServiceDep
+from services.job_service import JobServiceDep
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/jobs", tags=["Jobs"])
