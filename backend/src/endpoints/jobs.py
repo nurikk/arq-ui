@@ -3,7 +3,6 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 
 from core.config import Settings, get_app_settings
-from core.depends import get_lru_cache, get_redis_settings
 from fastapi import APIRouter, HTTPException, Query
 from schemas.job import (
     Job,

@@ -14,8 +14,9 @@ from arq.jobs import Job as ArqJob
 from fastapi import Depends
 from core.cache import LRUCache
 from core.config import Settings, get_app_settings
+from core.depends import get_lru_cache, get_redis_settings
 from schemas.job import ColorStatistics, Job, JobCreate, JobStatus, JobsTimeStatistics
-
+from msgpack.exceptions import ExtraData
 settings: Settings = get_app_settings()
 
 
@@ -28,17 +29,16 @@ class JobService:
         cache: LRUCache,
         request_semaphore_jobs: int = 5,
     ) -> None:
-        self.redis = None
+        self.redis: arq.ArqRedis = None
         self.redis_settings = redis_settings
         self.cache = cache
         self.request_semaphore_jobs = request_semaphore_jobs
         self.logger = logging.getLogger(__name__)
 
     async def init_pool(self):
-        if self.redis is None:
-            self.redis = await create_pool(self.redis_settings,
-                                           job_serializer=settings.job_serializer,
-                                           job_deserializer=settings.job_deserializer)
+        self.redis = await create_pool(self.redis_settings,
+                                       job_serializer=settings.job_serializer,
+                                       job_deserializer=settings.job_deserializer)
 
     async def get_status(self) -> dict[str, str]:
         """Get status redis."""
@@ -64,15 +64,15 @@ class JobService:
                 "",
             )
 
-            arq_job = ArqJob(key_id_without_prefix, self.redis, _queue_name=settings.queue_name)
+            arq_job = ArqJob(key_id_without_prefix, self.redis,
+                             _queue_name=settings.queue_name,
+                             _deserializer=settings.job_deserializer)
             status = await arq_job.status()
 
             if status == arq.jobs.JobStatus.complete:
-                complete_key: str = arq.constants.result_key_prefix + key_id_without_prefix
-                redis_raw = await self.redis.get(complete_key)
                 try:
-                    job_result: arq.jobs.JobResult = arq.jobs.deserialize_result(redis_raw)
-                except DeserializationError:
+                    job_result: arq.jobs.JobResult = await arq_job.result_info()
+                except (DeserializationError, ExtraData):
                     self.logger.exception("Error deserializing job result")
                     return None
 
@@ -99,7 +99,7 @@ class JobService:
             else:
                 keys_queued_job = arq.constants.job_key_prefix + key_id_without_prefix
                 redis_raw = await self.redis.get(keys_queued_job)
-                job: arq.jobs.JobDef = arq.jobs.deserialize_job(redis_raw)
+                job: arq.jobs.JobDef = arq.jobs.deserialize_job(redis_raw, deserializer=settings.job_deserializer)
                 job_schema = Job(
                     id=key_id_without_prefix,
                     enqueue_time=job.enqueue_time.replace(tzinfo=ZoneInfo(settings.timezone)),
@@ -232,7 +232,7 @@ class JobService:
 
 
 async def get_job_service() -> JobService:
-    service = JobService(redis_settings=settings.redis_settings, cache=LRUCache())
+    service = JobService(redis_settings=get_redis_settings(), cache=get_lru_cache())
     await service.init_pool()
     return service
 
